@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2] - 2026-08-20
+
+### Approvals
+
+- Emit an iTerm2-compatible desktop notification with a terminal-bell fallback when the gate is
+  waiting for an approval decision.
+
 ## [0.1.1] - 2026-08-20
 
 ### Approvals

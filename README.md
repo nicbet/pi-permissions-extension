@@ -27,7 +27,7 @@ The gate is **selective**: only commands and filesystem accesses that it flags a
 - **Allow once** — run it this time only.
 - **Always allow · `<rule>`** — run it and remember a rule so this class of command stops asking (shown only when a safe rule can be formed and the project is trusted).
 
-Choosing **Always allow** then asks whether to remember the rule for **just you** (a gitignored `.pi/permissions.local.json`) or to **share it with the project** (`.pi/permissions.json`, which you can commit). In noninteractive print and JSON modes a flagged call is blocked, because it cannot be approved.
+Choosing **Always allow** then asks whether to remember the rule for **just you** (a gitignored `.pi/permissions.local.json`) or to **share it with the project** (`.pi/permissions.json`, which you can commit). In an interactive terminal, the gate emits an iTerm2-compatible desktop notification (OSC 9) and a terminal-bell fallback when it needs approval. In noninteractive print and JSON modes a flagged call is blocked, because it cannot be approved.
 
 ## Protected commands
 

@@ -977,6 +977,18 @@ function approvalReason(reason: string): string {
   return reason.length > 0 ? `${reason[0].toUpperCase()}${reason.slice(1)}` : reason;
 }
 
+/** Alert an unfocused terminal that the permission gate needs an answer. */
+function notifyApprovalRequired(): void {
+  if (!process.stdout.isTTY) return;
+  try {
+    // OSC 9 is iTerm2's macOS notification sequence; unsupported terminals ignore it.
+    // The trailing BEL remains a fallback for terminals that support an audible alert only.
+    process.stdout.write("\x1b]9;Approval Required\x07\x07");
+  } catch {
+    // A closed or unsupported terminal must not interfere with the approval flow.
+  }
+}
+
 type ApprovalResponse = Readonly<{ choice: string; guidance?: string }> | undefined;
 
 /** TUI approval prompt with an inline guidance editor. */
@@ -1106,6 +1118,8 @@ async function decide(request: DecisionRequest): Promise<Decision> {
       reason: `${request.unavailableReason}: confirmation is unavailable in ${request.mode} mode.`,
     };
   }
+
+  notifyApprovalRequired();
 
   const canRemember = request.suggestedRule !== undefined && request.trusted;
   const alwaysAllow = request.suggestedRule ? `Always allow · ${request.suggestedRule}` : undefined;
