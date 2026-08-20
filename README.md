@@ -20,9 +20,10 @@ Restart Pi after installation.
 
 ## How it works
 
-The gate is **selective**: only commands and filesystem accesses that it flags as risky trigger a prompt. Everything else runs untouched. When something is flagged, you get one prompt with three choices:
+The gate is **selective**: only commands and filesystem accesses that it flags as risky trigger a prompt. Everything else runs untouched. When something is flagged, you get one prompt with four choices:
 
-- **Deny** — block the call and tell the agent why.
+- **Deny** — block the call.
+- **Deny & guide agent…** — block the call and provide typed guidance that is returned to the agent.
 - **Allow once** — run it this time only.
 - **Always allow · `<rule>`** — run it and remember a rule so this class of command stops asking (shown only when a safe rule can be formed and the project is trusted).
 
@@ -89,7 +90,7 @@ Two safety properties back this up:
 
 The extension records Pi's working directory at session start as the project boundary and prompts before the `read`, `write`, `edit`, `grep`, `find`, or `ls` tools access a path outside it — reads (including searches and listings) and modifications alike. Paths are canonicalized through existing symlinks, so a symlink inside the project that points outside still prompts.
 
-It also prompts for sensitive paths inside the project: likely credential/secret files, shell/package/authentication configuration, Git hooks, CI workflows, and build/deployment configuration files.
+It also prompts for sensitive paths inside the project: likely credential/secret files, shell/package/authentication configuration, Git hooks, CI workflows, and build/deployment configuration files. Read-only `Makefile` access is allowed, while modifications remain protected.
 
 The boundary is exact for the structured filesystem tools. Shell commands are not a safely parseable description of their filesystem effects, but the gate conservatively detects visible `../`, `~/`, and absolute external path arguments, plus the sensitive-path tokens described above.
 

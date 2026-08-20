@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.1] - 2026-08-20
+
+### Approvals
+
+- Redesigned interactive approval requests as a Pi-style, pending-background box with a distinct
+  heading, white command, dimmed reason, and keyboard-navigable choices.
+- Added inline **Deny & guide agent** input. Its typed guidance is returned in the blocked result
+  and sent as a queued user message to ensure the agent receives it.
+
+### Calibration
+
+- Avoid false positives for labels containing `host`, quoted ampersands, `find` filename predicates,
+  read-only `Makefile` access, and `/dev/null` in shell commands.
+
 ## [0.1.0] - 2026-08-19
 
 Initial release. A dependency-free Pi extension that asks for confirmation before Pi runs risky

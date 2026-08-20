@@ -8,7 +8,23 @@
 
 import { mkdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { CONFIG_DIR_NAME, isToolCallEventType, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+  CONFIG_DIR_NAME,
+  DynamicBorder,
+  isToolCallEventType,
+  type ExtensionAPI,
+  type Theme,
+} from "@earendil-works/pi-coding-agent";
+import {
+  Input,
+  Key,
+  matchesKey,
+  truncateToWidth,
+  visibleWidth,
+  wrapTextWithAnsi,
+  type Component,
+  type Focusable,
+} from "@earendil-works/pi-tui";
 
 type DangerousCommand = Readonly<{ name: string; pattern: RegExp }>;
 
@@ -350,7 +366,7 @@ const DANGEROUS_COMMANDS: readonly DangerousCommand[] = [
   {
     name: "outbound network or clipboard access",
     pattern:
-      /\b(?:curl|wget|httpie?|nc|ncat|netcat|socat|ftp|telnet|sendmail|mail|mutt|msmtp|dig|nslookup|host|xclip|xsel|pbcopy|wl-copy)\b/i,
+      /\b(?:curl|wget|httpie?|nc|ncat|netcat|socat|ftp|telnet|sendmail|mail|mutt|msmtp|dig|nslookup|xclip|xsel|pbcopy|wl-copy)\b|(?:^|[\n;&|()]\s*)(?:\S*\/)?host\b/i,
   },
   {
     name: "network listener or tunnel",
@@ -372,8 +388,7 @@ const DANGEROUS_COMMANDS: readonly DangerousCommand[] = [
   },
   {
     name: "persistent or resource-control process change",
-    pattern:
-      /(?:^|[;&|()]|\s)(?:nohup|disown|screen|tmux|nice|renice|ionice|cpulimit|ulimit|cgroups?)\b|(?<![&>])&(?![&>])/i,
+    pattern: /(?:^|[;&|()]|\s)(?:nohup|disown|screen|tmux|nice|renice|ionice|cpulimit|ulimit|cgroups?)\b/i,
   },
   {
     name: "user, authentication, or namespace change",
@@ -447,9 +462,17 @@ const SENSITIVE_PATHS: readonly DangerousCommand[] = [
   {
     name: "Git hook or CI/build configuration",
     pattern:
-      /(?:^|\/)(?:\.git\/hooks|\.github\/workflows|\.gitlab-ci\.yml|Jenkinsfile|\.circleci\/config\.yml|Makefile|Dockerfile|docker-compose\.ya?ml|Procfile|\.husky)(?:$|\/)/i,
+      /(?:^|\/)(?:\.git\/hooks|\.github\/workflows|\.gitlab-ci\.yml|Jenkinsfile|\.circleci\/config\.yml|Dockerfile|docker-compose\.ya?ml|Procfile|\.husky)(?:$|\/)/i,
   },
-  { name: "system configuration or device path", pattern: /^(?:\/(?:etc|usr|var|opt|dev|proc|sys)|~\/)/i },
+  {
+    name: "system configuration or device path",
+    pattern: /^(?:\/(?:etc|usr|var|opt|proc|sys)|\/dev(?:\/(?!null(?:$|\/))|$)|~\/)/i,
+  },
+];
+
+/** Build files are safe to inspect, but changing them can alter project execution. */
+const WRITE_SENSITIVE_PATHS: readonly DangerousCommand[] = [
+  { name: "build configuration", pattern: /(?:^|\/)Makefile(?:$|\/)/i },
 ];
 
 function stringArray(value: unknown): string[] {
@@ -559,24 +582,97 @@ function matchingPatterns(value: string, patterns: readonly DangerousCommand[]):
   return patterns.filter(({ pattern }) => pattern.test(value)).map(({ name }) => name);
 }
 
-function matchingDangerousCommands(command: string): string[] {
-  return matchingPatterns(command, DANGEROUS_COMMANDS);
+/** Detect an unquoted shell background operator, excluding `&&`, `&>`, and `>&`. */
+function hasBackgroundOperator(command: string): boolean {
+  let quote: "'" | '"' | undefined;
+
+  for (let index = 0; index < command.length; index += 1) {
+    const character = command[index];
+    if (character === "\\") {
+      index += 1;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) quote = undefined;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+    // A shell comment starts at a word boundary and runs through the newline.
+    if (character === "#" && (index === 0 || /\s/.test(command[index - 1]))) {
+      const newline = command.indexOf("\n", index);
+      if (newline < 0) return false;
+      index = newline;
+      continue;
+    }
+    if (
+      character === "&" &&
+      command[index - 1] !== "&" &&
+      command[index - 1] !== ">" &&
+      command[index + 1] !== "&" &&
+      command[index + 1] !== ">"
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
-function matchingSensitivePaths(path: string): string[] {
-  return matchingPatterns(path, SENSITIVE_PATHS);
+function matchingDangerousCommands(command: string): string[] {
+  const matches = matchingPatterns(command, DANGEROUS_COMMANDS);
+  if (hasBackgroundOperator(command)) matches.push("persistent or resource-control process change");
+  return matches;
+}
+
+function matchingSensitivePaths(path: string, includeWriteSensitive = false): string[] {
+  return matchingPatterns(
+    path,
+    includeWriteSensitive ? [...SENSITIVE_PATHS, ...WRITE_SENSITIVE_PATHS] : SENSITIVE_PATHS,
+  );
 }
 
 /**
  * Split a shell command into candidate path/filename arguments. Redirect operators,
  * pipes, separators, and subshell punctuation are treated as delimiters so that a
  * redirect target such as `> .git/hooks/pre-commit` is isolated as its own token.
+ * `find` filename predicates only describe names—they do not access the named file—
+ * so their argument is excluded.
  */
 function bashPathCandidates(command: string): string[] {
-  return command
-    .split(/[\s;&|()<>{}]+/)
-    .map((token) => token.replace(/^[@=]+/, "").replace(/^['"]+|['"]+$/g, ""))
-    .filter(Boolean);
+  const candidates: string[] = [];
+  let isFind = false;
+  let atCommandStart = true;
+  let skipFindPredicateArgument = false;
+
+  for (const part of command.split(/([\s;&|()<>{}]+)/)) {
+    if (!part) continue;
+    if (/[;&|()]/.test(part)) {
+      isFind = false;
+      atCommandStart = true;
+      skipFindPredicateArgument = false;
+      continue;
+    }
+    if (/^[\s<>{}]+$/.test(part)) continue;
+
+    const token = part.replace(/^[@=]+/, "").replace(/^['"]+|['"]+$/g, "");
+    if (!token) continue;
+    if (skipFindPredicateArgument) {
+      skipFindPredicateArgument = false;
+      continue;
+    }
+    if (isFind && /^(?:-i?name|-i?path|-i?regex)$/i.test(token)) {
+      skipFindPredicateArgument = true;
+      continue;
+    }
+    candidates.push(token);
+    if (atCommandStart) {
+      isFind = toolBaseName(token) === "find";
+      atCommandStart = false;
+    }
+  }
+  return candidates;
 }
 
 /**
@@ -587,7 +683,7 @@ function bashPathCandidates(command: string): string[] {
 function matchingSensitiveBashPaths(command: string): string[] {
   const names = new Set<string>();
   for (const token of bashPathCandidates(command)) {
-    for (const name of matchingSensitivePaths(token)) names.add(name);
+    for (const name of matchingSensitivePaths(token, true)) names.add(name);
   }
   return [...names];
 }
@@ -760,6 +856,9 @@ async function hasExternalPathReference(command: string, projectRoot: string, cw
   if (references.some((path) => path.startsWith("~/"))) return true;
 
   for (const path of references) {
+    // `/dev/null` is a conventional harmless source/sink, including for
+    // `git diff --no-index /dev/null new-file`; it does not cross the project boundary.
+    if (path === "/dev/null") continue;
     if (await isOutsideProject(path, projectRoot, cwd)) return true;
   }
   return false;
@@ -870,23 +969,136 @@ type Decision = { block: true; reason: string } | undefined;
 
 const ALLOW_ONCE = "Allow once";
 const DENY = "Deny";
+const DENY_WITH_GUIDANCE = "Deny & guide agent…";
 const REMEMBER_LOCAL = `Just me (${CONFIG_DIR_NAME}/${LOCAL_PERMISSIONS_FILE})`;
 const REMEMBER_SHARED = `Share with project (${CONFIG_DIR_NAME}/${PERMISSIONS_FILE})`;
 
+function approvalReason(reason: string): string {
+  return reason.length > 0 ? `${reason[0].toUpperCase()}${reason.slice(1)}` : reason;
+}
+
+type ApprovalResponse = Readonly<{ choice: string; guidance?: string }> | undefined;
+
+/** TUI approval prompt with an inline guidance editor. */
+class ApprovalDialog implements Component, Focusable {
+  private selected = 0;
+  private mode: "choices" | "guidance" = "choices";
+  private readonly guidanceInput = new Input();
+  private readonly border: DynamicBorder;
+  private _focused = false;
+
+  get focused(): boolean {
+    return this._focused;
+  }
+
+  set focused(value: boolean) {
+    this._focused = value;
+    this.guidanceInput.focused = value;
+  }
+
+  constructor(
+    private readonly command: string,
+    private readonly reason: string,
+    private readonly options: readonly string[],
+    private readonly theme: Theme,
+    private readonly done: (response: ApprovalResponse) => void,
+  ) {
+    this.border = new DynamicBorder((text: string) => this.theme.fg("borderAccent", text));
+    this.guidanceInput.onSubmit = (guidance) => this.done({ choice: DENY_WITH_GUIDANCE, guidance });
+    this.guidanceInput.onEscape = () => {
+      this.mode = "choices";
+      this.guidanceInput.setValue("");
+    };
+  }
+
+  handleInput(data: string): void {
+    if (this.mode === "guidance") {
+      this.guidanceInput.handleInput(data);
+      return;
+    }
+    if (matchesKey(data, Key.up) || matchesKey(data, Key.shift("tab"))) {
+      this.selected = (this.selected + this.options.length - 1) % this.options.length;
+    } else if (matchesKey(data, Key.down) || matchesKey(data, Key.tab)) {
+      this.selected = (this.selected + 1) % this.options.length;
+    } else if (matchesKey(data, Key.enter)) {
+      const choice = this.options[this.selected];
+      if (choice === DENY_WITH_GUIDANCE) {
+        this.mode = "guidance";
+        this.guidanceInput.focused = this.focused;
+      } else {
+        this.done({ choice });
+      }
+    } else if (matchesKey(data, Key.escape)) {
+      this.done(undefined);
+    }
+  }
+
+  render(width: number): string[] {
+    const lineWidth = Math.max(width, 1);
+    const contentWidth = Math.max(lineWidth - 2, 1);
+    const command = wrapTextWithAnsi(this.theme.fg("text", this.command), contentWidth);
+    const reason = wrapTextWithAnsi(this.theme.fg("muted", approvalReason(this.reason)), contentWidth);
+    const choices = this.options.flatMap((option, index) => {
+      if (option === DENY_WITH_GUIDANCE && this.mode === "guidance") {
+        return this.guidanceInput.render(contentWidth).map((line) => this.theme.fg("accent", line));
+      }
+      return [this.renderChoice(option, index)];
+    });
+    const hint =
+      this.mode === "guidance" ? "Enter send guidance · Esc return to options" : "↑↓ select · Enter confirm · Esc deny";
+
+    const content = [
+      this.theme.fg("accent", this.theme.bold("Approval Required")),
+      "",
+      ...command,
+      ...reason,
+      "",
+      ...choices,
+      "",
+      this.theme.fg("muted", hint),
+    ];
+    return [
+      ...this.border.render(lineWidth),
+      ...content.map((line) => this.withBackground(line, lineWidth, contentWidth)),
+      ...this.border.render(lineWidth),
+    ];
+  }
+
+  invalidate(): void {
+    this.border.invalidate();
+    this.guidanceInput.invalidate();
+  }
+
+  private withBackground(line: string, width: number, contentWidth: number): string {
+    const truncated = truncateToWidth(line, contentWidth);
+    const padded = ` ${truncated}${" ".repeat(Math.max(0, width - visibleWidth(truncated) - 1))}`;
+    return this.theme.bg("toolPendingBg", padded);
+  }
+
+  private renderChoice(option: string, index: number): string {
+    const selected = index === this.selected;
+    const label = `${selected ? "› " : "  "}${selected ? this.theme.bold(option) : option}`;
+    return this.theme.fg(selected ? "accent" : "muted", label);
+  }
+}
+
 interface DecisionRequest {
-  title: string;
-  detail: string;
+  command: string;
+  reason: string;
   suggestedRule: string | undefined;
   trusted: boolean;
   mode: string;
   hasUI: boolean;
   select: (title: string, options: string[]) => Promise<string | undefined>;
+  presentApproval?: (options: string[]) => Promise<ApprovalResponse>;
+  guide: () => Promise<string | undefined>;
+  sendGuidance: (guidance: string) => void;
   blockedReason: string;
   unavailableReason: string;
   save: (rule: string, scope: RuleScope) => Promise<void>;
 }
 
-/** Present the uniform Deny / Allow Once / Always Allow prompt and act on the choice. */
+/** Present the approval prompt and apply the selected decision. */
 async function decide(request: DecisionRequest): Promise<Decision> {
   if (!request.hasUI) {
     return {
@@ -897,11 +1109,30 @@ async function decide(request: DecisionRequest): Promise<Decision> {
 
   const canRemember = request.suggestedRule !== undefined && request.trusted;
   const alwaysAllow = request.suggestedRule ? `Always allow · ${request.suggestedRule}` : undefined;
-  const options = canRemember && alwaysAllow ? [ALLOW_ONCE, alwaysAllow, DENY] : [ALLOW_ONCE, DENY];
+  const options =
+    canRemember && alwaysAllow
+      ? [ALLOW_ONCE, alwaysAllow, DENY, DENY_WITH_GUIDANCE]
+      : [ALLOW_ONCE, DENY, DENY_WITH_GUIDANCE];
   const hint = request.suggestedRule && !canRemember ? "\n(Trust this project to remember approvals.)" : "";
+  const fallbackTitle = `Approval Request\n\n${request.command}\n${approvalReason(request.reason)}${hint}`;
+  let response: ApprovalResponse;
+  if (request.presentApproval) {
+    response = await request.presentApproval(options);
+  } else {
+    const choice = await request.select(fallbackTitle, options);
+    response = choice ? { choice } : undefined;
+  }
+  const choice = response?.choice;
 
-  const choice = await request.select(`${request.title}\n${request.detail}${hint}`, options);
   if (choice === ALLOW_ONCE) return undefined;
+  if (choice === DENY_WITH_GUIDANCE) {
+    const guidance = (response?.guidance ?? (await request.guide()))?.trim();
+    if (guidance) request.sendGuidance(guidance);
+    return {
+      block: true,
+      reason: guidance ? `${request.blockedReason}\n\nUser guidance: ${guidance}` : request.blockedReason,
+    };
+  }
   if (alwaysAllow && choice === alwaysAllow && request.suggestedRule) {
     const scopeChoice = await request.select(`Remember ${request.suggestedRule}`, [REMEMBER_LOCAL, REMEMBER_SHARED]);
     if (scopeChoice !== REMEMBER_LOCAL && scopeChoice !== REMEMBER_SHARED) {
@@ -945,6 +1176,27 @@ export default function permissionGate(pi: ExtensionAPI) {
   pi.on("tool_call", async (event, ctx) => {
     const trusted = projectTrusted && projectRoot !== undefined;
     const select = ctx.ui.select.bind(ctx.ui);
+    const presentApproval =
+      ctx.mode === "tui" && typeof ctx.ui.custom === "function"
+        ? (command: string, reason: string) => (options: string[]) =>
+            ctx.ui.custom<ApprovalResponse>((tui, theme, _keybindings, done) => {
+              const dialog = new ApprovalDialog(command, reason, options, theme, done);
+              return {
+                render: (width) => dialog.render(width),
+                invalidate: () => dialog.invalidate(),
+                handleInput: (data) => {
+                  dialog.handleInput(data);
+                  tui.requestRender();
+                },
+              };
+            })
+        : undefined;
+    const guide = () => ctx.ui.editor("Tell the agent what to do instead:", "");
+    const sendGuidance = (guidance: string) => {
+      pi.sendUserMessage(`The permission request was denied. Follow this guidance instead: ${guidance}`, {
+        deliverAs: "steer",
+      });
+    };
 
     if (isToolCallEventType("bash", event)) {
       const rawCommand = event.input.command;
@@ -971,13 +1223,16 @@ export default function permissionGate(pi: ExtensionAPI) {
 
       const suggestedRule = suggestBashRule(normalizedCommand, isHighRisk(matches));
       return decide({
-        title: "Allow this command?",
-        detail: `matches: ${matches.join(", ")}\n\n${rawCommand}`,
+        command: rawCommand,
+        reason: matches.join(", "),
         suggestedRule,
         trusted,
         mode: ctx.mode,
         hasUI: ctx.hasUI,
         select,
+        presentApproval: presentApproval?.(rawCommand, matches.join(", ")),
+        guide,
+        sendGuidance,
         blockedReason: `Blocked ${matches.join(", ")}`,
         unavailableReason: `Blocked ${matches.join(", ")}`,
         save: saveRule,
@@ -999,7 +1254,7 @@ export default function permissionGate(pi: ExtensionAPI) {
     const base = projectRoot ?? ctx.cwd;
     const capability: "read" | "write" = event.toolName === "write" || event.toolName === "edit" ? "write" : "read";
     const outsideProject = await isOutsideProject(path, base, ctx.cwd);
-    const sensitiveMatches = matchingSensitivePaths(path);
+    const sensitiveMatches = matchingSensitivePaths(path, capability === "write");
     const denyMatches = await matchingPathDenyRules(path, projectPermissions, base);
 
     const matches: string[] = [];
@@ -1012,13 +1267,16 @@ export default function permissionGate(pi: ExtensionAPI) {
     const operation = capability === "read" ? "read" : "modify";
     const subtree = event.toolName === "ls" || event.toolName === "find";
     return decide({
-      title: `Allow Pi to ${operation} this path?`,
-      detail: `${matches.join(", ")}\n\npath: ${path}`,
+      command: path,
+      reason: matches.join(", "),
       suggestedRule: suggestPathRule(path, capability, subtree),
       trusted,
       mode: ctx.mode,
       hasUI: ctx.hasUI,
       select,
+      presentApproval: presentApproval?.(path, matches.join(", ")),
+      guide,
+      sendGuidance,
       blockedReason: `Blocked attempt to ${operation}: ${matches.join(", ")}`,
       unavailableReason: `Blocked attempt to ${operation} ${outsideProject ? "outside the project" : "a protected path"}`,
       save: saveRule,
