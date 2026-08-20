@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3] - 2026-08-20
+
+### Noninteractive policy
+
+- Add configurable noninteractive behavior with project-local, project-shared, and user-global
+  scopes; the safe default remains to block.
+
 ## [0.1.2] - 2026-08-20
 
 ### Approvals

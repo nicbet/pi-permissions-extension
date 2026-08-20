@@ -64,7 +64,8 @@ Approvals are stored as **rules** in `.pi/permissions.json` (shared, committable
   "deny": [
     "Bash(*production*)",
     "Write(infra/production/*)"
-  ]
+  ],
+  "nonInteractive": "block"
 }
 ```
 
@@ -73,6 +74,12 @@ Rule format:
 - `Bash(<pattern>)` matches the normalized command. A trailing/embedded `*` is a wildcard; without a `*` the rule is exact.
 - `Read(<path>)` covers the read-family tools (`read`, `grep`, `find`, `ls`); `Write(<path>)` / `Edit(<path>)` cover `write` and `edit`. A trailing `/*` matches a whole subtree; otherwise the rule is an exact path.
 - `allow` rules suppress the prompt for matching calls. `deny` rules **add** a prompt and always win over `allow`.
+
+### Noninteractive policy
+
+In print and JSON modes, the default `"nonInteractive": "block"` denies calls that would require approval. Set it to `"allow"` to run those calls without prompting—for example in an explicitly trusted CI project.
+
+Set the policy in `.pi/permissions.json` (shared) or `.pi/permissions.local.json` (personal). Set it globally in `~/.pi/agent/permissions.json`. Precedence is local project, shared project, global, then the blocking default. Project `deny` rules still block in noninteractive allow mode.
 
 ### Smart, risk-aware prefixes
 

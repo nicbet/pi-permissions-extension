@@ -7,6 +7,7 @@
  */
 
 import { mkdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
   CONFIG_DIR_NAME,
@@ -309,7 +310,12 @@ type BashRule = Readonly<{ capability: "bash"; glob: boolean; regex: RegExp; raw
 type PathRule = Readonly<{ capability: "read" | "write"; subtree: boolean; path: string; raw: string }>;
 type Rule = BashRule | PathRule;
 
-type ProjectPermissions = Readonly<{ allow: readonly Rule[]; deny: readonly Rule[] }>;
+type NonInteractivePolicy = "allow" | "block";
+type ProjectPermissions = Readonly<{
+  allow: readonly Rule[];
+  deny: readonly Rule[];
+  nonInteractive?: NonInteractivePolicy;
+}>;
 
 const EMPTY_PROJECT_PERMISSIONS: ProjectPermissions = { allow: [], deny: [] };
 
@@ -518,14 +524,26 @@ function parseRules(value: unknown): Rule[] {
   return rules;
 }
 
+function parseNonInteractivePolicy(value: unknown): NonInteractivePolicy | undefined {
+  return value === "allow" || value === "block" ? value : undefined;
+}
+
 function parseProjectPermissions(value: unknown): ProjectPermissions {
   if (!value || typeof value !== "object" || Array.isArray(value)) return EMPTY_PROJECT_PERMISSIONS;
-  const config = value as { allow?: unknown; deny?: unknown };
-  return { allow: parseRules(config.allow), deny: parseRules(config.deny) };
+  const config = value as { allow?: unknown; deny?: unknown; nonInteractive?: unknown };
+  return {
+    allow: parseRules(config.allow),
+    deny: parseRules(config.deny),
+    nonInteractive: parseNonInteractivePolicy(config.nonInteractive),
+  };
 }
 
 function mergePermissions(a: ProjectPermissions, b: ProjectPermissions): ProjectPermissions {
-  return { allow: [...a.allow, ...b.allow], deny: [...a.deny, ...b.deny] };
+  return {
+    allow: [...a.allow, ...b.allow],
+    deny: [...a.deny, ...b.deny],
+    nonInteractive: b.nonInteractive ?? a.nonInteractive,
+  };
 }
 
 async function loadJson(path: string): Promise<unknown> {
@@ -545,6 +563,11 @@ async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
 
 const PERMISSIONS_FILE = "permissions.json";
 const LOCAL_PERMISSIONS_FILE = "permissions.local.json";
+
+/** User-wide policy file, alongside Pi's user settings (`~/.pi/agent/settings.json`). */
+function globalPermissionsFilePath(): string {
+  return join(homedir(), CONFIG_DIR_NAME, "agent", PERMISSIONS_FILE);
+}
 
 function permissionsFilePath(projectRoot: string, scope: RuleScope): string {
   return join(projectRoot, CONFIG_DIR_NAME, scope === "local" ? LOCAL_PERMISSIONS_FILE : PERMISSIONS_FILE);
@@ -1101,6 +1124,8 @@ interface DecisionRequest {
   trusted: boolean;
   mode: string;
   hasUI: boolean;
+  nonInteractive: NonInteractivePolicy;
+  forceNonInteractiveBlock: boolean;
   select: (title: string, options: string[]) => Promise<string | undefined>;
   presentApproval?: (options: string[]) => Promise<ApprovalResponse>;
   guide: () => Promise<string | undefined>;
@@ -1113,6 +1138,7 @@ interface DecisionRequest {
 /** Present the approval prompt and apply the selected decision. */
 async function decide(request: DecisionRequest): Promise<Decision> {
   if (!request.hasUI) {
+    if (request.nonInteractive === "allow" && !request.forceNonInteractiveBlock) return undefined;
     return {
       block: true,
       reason: `${request.unavailableReason}: confirmation is unavailable in ${request.mode} mode.`,
@@ -1166,6 +1192,7 @@ export default function permissionGate(pi: ExtensionAPI) {
   let projectRoot: string | undefined;
   let projectTrusted = false;
   let projectPermissions = EMPTY_PROJECT_PERMISSIONS;
+  let globalNonInteractive: NonInteractivePolicy | undefined;
   const aliases = new Map<string, string>();
 
   const saveRule = async (rule: string, scope: RuleScope): Promise<void> => {
@@ -1180,6 +1207,7 @@ export default function permissionGate(pi: ExtensionAPI) {
     projectRoot = resolve(ctx.cwd);
     projectTrusted = ctx.isProjectTrusted();
     projectPermissions = EMPTY_PROJECT_PERMISSIONS;
+    globalNonInteractive = parseProjectPermissions(await loadJson(globalPermissionsFilePath())).nonInteractive;
     if (projectTrusted) {
       const shared = parseProjectPermissions(await loadJson(permissionsFilePath(projectRoot, "shared")));
       const local = parseProjectPermissions(await loadJson(permissionsFilePath(projectRoot, "local")));
@@ -1189,6 +1217,7 @@ export default function permissionGate(pi: ExtensionAPI) {
 
   pi.on("tool_call", async (event, ctx) => {
     const trusted = projectTrusted && projectRoot !== undefined;
+    const nonInteractive = projectPermissions.nonInteractive ?? globalNonInteractive ?? "block";
     const select = ctx.ui.select.bind(ctx.ui);
     const presentApproval =
       ctx.mode === "tui" && typeof ctx.ui.custom === "function"
@@ -1243,6 +1272,8 @@ export default function permissionGate(pi: ExtensionAPI) {
         trusted,
         mode: ctx.mode,
         hasUI: ctx.hasUI,
+        nonInteractive,
+        forceNonInteractiveBlock: matches.some((match) => match.startsWith("project deny")),
         select,
         presentApproval: presentApproval?.(rawCommand, matches.join(", ")),
         guide,
@@ -1287,6 +1318,8 @@ export default function permissionGate(pi: ExtensionAPI) {
       trusted,
       mode: ctx.mode,
       hasUI: ctx.hasUI,
+      nonInteractive,
+      forceNonInteractiveBlock: matches.some((match) => match.startsWith("project deny")),
       select,
       presentApproval: presentApproval?.(path, matches.join(", ")),
       guide,

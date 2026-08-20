@@ -66,7 +66,7 @@ function runBashCommand(command: string, hasUI: boolean, decision: Decision = "d
 /** Runs a tool call inside a trusted temp project, optionally pre-seeded with permission files. */
 async function runInProject(
   event: unknown,
-  options: { decision?: Decision; scope?: Scope; shared?: unknown; local?: unknown } = {},
+  options: { decision?: Decision; scope?: Scope; shared?: unknown; local?: unknown; hasUI?: boolean } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "pi-permissions-test-"));
   const pi = createPi();
@@ -82,7 +82,8 @@ async function runInProject(
     await sessionStart({}, { cwd: root, isProjectTrusted: () => true });
 
     const ui = scriptedUi(options.decision ?? "deny", options.scope ?? "shared");
-    const result = await toolCall(event, { cwd: root, hasUI: true, mode: "tui", ui });
+    const hasUI = options.hasUI ?? true;
+    const result = await toolCall(event, { cwd: root, hasUI, mode: hasUI ? "tui" : "print", ui });
 
     const read = async (name: string) => {
       try {
@@ -148,6 +149,38 @@ test("blocks matching commands without a confirmation UI", async () => {
   expect(result).toEqual({
     block: true,
     reason: "Blocked file removal (rm): confirmation is unavailable in print mode.",
+  });
+});
+
+test("permits prompted operations in noninteractive mode when the project allows it", async () => {
+  const { result, prompted } = await bashInProject("rm -rf build", {
+    hasUI: false,
+    shared: { nonInteractive: "allow" },
+  });
+  expect(result).toBeUndefined();
+  expect(prompted).toBe(false);
+});
+
+test("a local noninteractive policy overrides the shared project policy", async () => {
+  const { result } = await bashInProject("rm -rf build", {
+    hasUI: false,
+    shared: { nonInteractive: "allow" },
+    local: { nonInteractive: "block" },
+  });
+  expect(result).toEqual({
+    block: true,
+    reason: "Blocked file removal (rm): confirmation is unavailable in print mode.",
+  });
+});
+
+test("a project deny rule still blocks in noninteractive allow mode", async () => {
+  const { result } = await bashInProject("rm -rf build", {
+    hasUI: false,
+    shared: { nonInteractive: "allow", deny: ["Bash(rm *)"] },
+  });
+  expect(result).toEqual({
+    block: true,
+    reason: "Blocked file removal (rm), project deny: Bash(rm *): confirmation is unavailable in print mode.",
   });
 });
 
