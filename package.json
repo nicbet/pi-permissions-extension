@@ -1,6 +1,6 @@
 {
   "name": "@nicbet/pi-permissions-extension",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Require confirmation before Pi runs dangerous bash commands",
   "license": "MIT",
   "repository": {
