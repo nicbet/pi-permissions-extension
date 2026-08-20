@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Terminal integration
+
+- Emit multi-terminal notifications when the approval dialog is waiting: iTerm2 dock bounce and tab
+  progress indicator (OSC 1337), Kitty/Konsole/foot desktop notification with critical urgency
+  (OSC 99), and a universal tab title change (OSC 2 with xterm title stack save/restore).
+- Clear all terminal state (dock bounce, progress indicator, title, Kitty notification) as soon as
+  the user responds.
+- Emit `herdr:blocked` events on Pi's event bus so herdr shows the red blocked indicator while the
+  approval dialog is active.
+
 ## [0.1.3] - 2026-08-20
 
 ### Noninteractive policy

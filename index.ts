@@ -1004,11 +1004,32 @@ function approvalReason(reason: string): string {
 function notifyApprovalRequired(): void {
   if (!process.stdout.isTTY) return;
   try {
-    // OSC 9 is iTerm2's macOS notification sequence; unsupported terminals ignore it.
-    // The trailing BEL remains a fallback for terminals that support an audible alert only.
-    process.stdout.write("\x1b]9;Approval Required\x07\x07");
+    process.stdout.write(
+      "\x1b]9;Approval Required\x07" + // iTerm2 notification (OSC 9)
+        "\x1b]1337;RequestAttention=once\x07" + // iTerm2 dock bounce + tab flash
+        "\x1b]9;4;4;\x07" + // iTerm2 tab progress — warning state
+        "\x1b[22;2t" + // save current title (xterm title stack)
+        "\x1b]2;⚠ Approval Required\x07" + // set title (OSC 2, visible in all terminals/tmux)
+        "\x1b]99;i=pi-approval:u=2:o=unfocused;Approval Required\x1b\\" + // Kitty/Konsole/foot (OSC 99)
+        "\x07", // terminal bell fallback
+    );
   } catch {
     // A closed or unsupported terminal must not interfere with the approval flow.
+  }
+}
+
+/** Clear terminal notifications after the approval prompt is answered. */
+function clearApprovalNotification(): void {
+  if (!process.stdout.isTTY) return;
+  try {
+    process.stdout.write(
+      "\x1b]1337;RequestAttention=no\x07" + // cancel iTerm2 dock bounce
+        "\x1b]9;4;0;\x07" + // clear iTerm2 tab progress
+        "\x1b[23;2t" + // restore saved title (xterm title stack)
+        "\x1b]99;i=pi-approval:p=close;\x1b\\", // dismiss Kitty notification (OSC 99)
+    );
+  } catch {
+    // Must not interfere with the decision flow.
   }
 }
 
@@ -1133,6 +1154,8 @@ interface DecisionRequest {
   blockedReason: string;
   unavailableReason: string;
   save: (rule: string, scope: RuleScope) => Promise<void>;
+  emitBlocked?: () => void;
+  emitUnblocked?: () => void;
 }
 
 /** Present the approval prompt and apply the selected decision. */
@@ -1146,6 +1169,7 @@ async function decide(request: DecisionRequest): Promise<Decision> {
   }
 
   notifyApprovalRequired();
+  request.emitBlocked?.();
 
   const canRemember = request.suggestedRule !== undefined && request.trusted;
   const alwaysAllow = request.suggestedRule ? `Always allow · ${request.suggestedRule}` : undefined;
@@ -1162,6 +1186,9 @@ async function decide(request: DecisionRequest): Promise<Decision> {
     const choice = await request.select(fallbackTitle, options);
     response = choice ? { choice } : undefined;
   }
+  clearApprovalNotification();
+  request.emitUnblocked?.();
+
   const choice = response?.choice;
 
   if (choice === ALLOW_ONCE) return undefined;
@@ -1240,6 +1267,8 @@ export default function permissionGate(pi: ExtensionAPI) {
         deliverAs: "steer",
       });
     };
+    const emitBlocked = () => pi.events.emit("herdr:blocked", { active: true, label: "Approval Required" });
+    const emitUnblocked = () => pi.events.emit("herdr:blocked", { active: false });
 
     if (isToolCallEventType("bash", event)) {
       const rawCommand = event.input.command;
@@ -1281,6 +1310,8 @@ export default function permissionGate(pi: ExtensionAPI) {
         blockedReason: `Blocked ${matches.join(", ")}`,
         unavailableReason: `Blocked ${matches.join(", ")}`,
         save: saveRule,
+        emitBlocked,
+        emitUnblocked,
       });
     }
 
@@ -1327,6 +1358,8 @@ export default function permissionGate(pi: ExtensionAPI) {
       blockedReason: `Blocked attempt to ${operation}: ${matches.join(", ")}`,
       unavailableReason: `Blocked attempt to ${operation} ${outsideProject ? "outside the project" : "a protected path"}`,
       save: saveRule,
+      emitBlocked,
+      emitUnblocked,
     });
   });
 }

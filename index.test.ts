@@ -18,6 +18,12 @@ function createPi() {
     sendUserMessage(message: string) {
       userMessages.push(message);
     },
+    events: {
+      emit(_channel: string, _data: unknown) {},
+      on(_channel: string, _handler: (data: unknown) => void) {
+        return () => {};
+      },
+    },
   };
 }
 
