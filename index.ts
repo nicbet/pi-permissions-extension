@@ -381,7 +381,8 @@ const DANGEROUS_COMMANDS: readonly DangerousCommand[] = [
   },
   {
     name: "dynamic or encoded code execution",
-    pattern: /\b(?:eval|exec|source|xargs|base64\s+-d|xxd|od|python\s+-c|node\s+-e|ruby\s+-e|perl\s+-e)\b/i,
+    pattern:
+      /\b(?:eval|exec|xargs|base64\s+-d|xxd|od|python\s+-c|node\s+-e|ruby\s+-e|perl\s+-e)\b|(?:^|[;\n(|]|&&|\|\|)\s*source\s|\bsource\s+[.~$/]/i,
   },
   {
     name: "pipe to a shell or interpreter",

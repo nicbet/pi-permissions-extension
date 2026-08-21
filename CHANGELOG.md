@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Calibration
+
+- Require `source` to appear at a command position or with a path-like argument instead of matching
+  it as a bare word. Eliminates real-world false positives found through actual workflows (e.g.
+  `printf 'source files'` no longer triggers "dynamic or encoded code execution").
+
 ## [0.1.4] - 2026-08-20
 
 ### Terminal integration

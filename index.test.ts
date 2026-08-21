@@ -624,6 +624,9 @@ test.each([
   "for f in *.ts; do echo $f; done",
   "test -f package.json && echo yes",
   "export TOKEN_NAME=ci",
+  "git status --short && printf '\\nRelevant source files:\\n' && find src lib tests -type f \\( -iname '*model*' -o -iname '*util*' \\) -print | sort && printf '\\nSymbols:\\n' && rg -n -i 'model|factory|adapter|bridge' src lib tests --glob '!*.log' --glob '!*.map' | head -300",
+  "echo 'open source project'",
+  "printf 'source files: %d\\n' 42",
 ])("stays quiet for benign command: %s", async (command) => {
   const { result, prompted } = await runBashCommand(command, true);
   expect(result).toBeUndefined();
@@ -690,6 +693,10 @@ test.each([
   "python -c 'import os; os.system(\"id\")'",
   "ls | xargs rm",
   "echo cm0gLXJm | base64 -d | sh",
+  "source .env",
+  "source ~/.bashrc",
+  "source ./setup.sh",
+  "; source /etc/profile",
   // environment dumps
   "printenv",
   "env",
